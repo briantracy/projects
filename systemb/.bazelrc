@@ -1,0 +1,8 @@
+
+build --conlyopt=-std=c11
+build --cxxopt=-std=c++17
+build --copt=-Wall --copt=-Wextra --copt=-Wconversion --copt=-Wpedantic --copt=-Wshadow
+
+build:asan --compilation_mode=dbg
+build:asan --copt=-fsanitize=address --copt=-fsanitize=undefined
+build:asan --linkopt=-fsanitize=address --linkopt=-fsanitize=undefined
