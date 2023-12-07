@@ -1,13 +1,23 @@
 /*
     middleman is a program that receives UDP packets on a specified
-    IP and port, then forwards them along to a separate port.
+    IP and port, then forwards them along to a separate IP and port.
 
     It can also be told to drop a certain percentage of its packets.
+
+    For a basic demo:
+        bazel run :middleman -- 127.0.0.1 5555 127.0.0.1 9999 0
+        printf 'packet-here' > /dev/udp/127.0.0.1/5555
+    Observe that the packet makes it to port 9999.
+
+    For a more fun demo, set up two middlemen, each pointed at the other:
+        bazel run :middleman -- 127.0.0.1 5555 127.0.0.1 9999 0
+        bazel run :middleman -- 127.0.0.1 9999 127.0.0.1 5555 0
+    Then kick off the infinite loop with a single packet:
+        printf 'loop' > /dev/udp/127.0.0.1/5555
 */
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <sys/_types/_socklen_t.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -56,21 +66,24 @@ int main(const int argc, const char *const argv[]) {
         return 1;
     }
 
-
     while (1) {
-        char buff[1000];
+        char buff[1 << 16];
         struct sockaddr_in sender;
         socklen_t socklen = sizeof(struct sockaddr);
         const ssize_t bytes_read = recvfrom(source_socket, buff, sizeof(buff), 0, (struct sockaddr *)&sender, &socklen);
-        if (bytes_read == -1) {
+        if (bytes_read < 0) {
             perror("recvfrom");
             return 1;
         }
-        printf("got packet of size: %d!\n", bytes_read);
+        printf("got packet of size: %zd!\n", bytes_read);
 
-        int r = sendto(source_socket, buff, bytes_read, 0, (struct sockaddr *)&sink_addr, sizeof(sink_addr));
-        if (r < 0) {
+        const ssize_t bytes_sent = sendto(source_socket, buff, (size_t)bytes_read, 0, (struct sockaddr *)&sink_addr, sizeof(sink_addr));
+        if (bytes_sent < 0) {
             perror("sendto");
+        }
+        if (bytes_sent != bytes_read) {
+            fprintf(stderr, "mismatch in bytes received vs sent: %zd vs %zd\n", bytes_read, bytes_sent);
+            return 1;
         }
     }
 

@@ -4,7 +4,6 @@ cc_library(
   name = "libbrp",
   hdrs = ["libbrp.hpp"],
   srcs = ["libbrp.cpp"],
-  copts = ["-std=c++17", "-Wpedantic", "-Wall", "-Wextra", "-Wconversion"],
 )
 
 cc_binary(
