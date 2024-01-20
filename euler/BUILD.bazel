@@ -1,6 +1,7 @@
 
 
-py_binary(
-  name = "p1",
-  srcs = ["p1.py"],
-)
+# Create a rule for every python source file
+[py_binary(
+  name = file.split(".")[0],
+  srcs = [file],
+) for file in glob(["p*.py"])]
