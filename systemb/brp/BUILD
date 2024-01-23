@@ -7,11 +7,12 @@ cc_library(
 )
 
 cc_binary(
-  name = "test",
-  srcs = ["test.c"],
+  name = "client",
+  srcs = ["client.cpp"],
+  deps = [":libbrp"],
 )
 
 cc_binary(
   name = "middleman",
-  srcs = ["middleman.c"],
+  srcs = ["middleman.c", "libbrp.hpp"],
 )
