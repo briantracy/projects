@@ -16,3 +16,5 @@
   * bdig_dns_encode
 * Jan 31
   * symlinked python -> python3 and got bazel fuzz targets in place
+* Feb 3
+  * Install LLVM and use it to get bazel fuzz testing to work
