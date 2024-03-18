@@ -18,3 +18,5 @@
   * symlinked python -> python3 and got bazel fuzz targets in place
 * Feb 3
   * Install LLVM and use it to get bazel fuzz testing to work
+* Mar 17
+  * Switch to makefile, dns name encoding works for `"abc.xyz"` and `"abc..xyz"`. Not sure if this is a valid domain name though.
