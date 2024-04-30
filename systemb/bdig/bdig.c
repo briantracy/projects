@@ -46,6 +46,16 @@ int encode_dns_name(const char *name, uint8_t *output)
     return encoded_bytes;
 }
 
+int decode_dns_name(const uint8_t *data, const int len, char *dest)
+{
+
+    int decoded_index = 0;
+    while (decoded_index < len) {
+        int label_length = data[decoded_index];
+
+    }
+}
+
 int main() {
     uint8_t buff[255];
     int len = encode_dns_name("abc..xyz", buff);
