@@ -19,3 +19,4 @@
   * LLVM toolchains in bazel. Slightly working, some linker errors with fuzzing
 * Apr 29
   * Large file for autocthon, no build system
+* May 11: `call` instruction decisions
