@@ -4,6 +4,7 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include <array>
 #include <chrono>
@@ -20,13 +21,18 @@
 class BRPClient {
   // Calls recv in a loop
   std::thread listen_thread;
+
   // Sleep with these while waiting for an ack.
-  // Also use mutex to synchronize access to read buffer
-  std::mutex mutex;
+  std::mutex ack_mutex;
   std::condition_variable ack_cv;
+
+  // Sleep with these while waiting for inbound data
+  std::mutex read_mutex;
+  std::condition_variable read_cv;
 
   int sequence_number_sent = 0;
   int ack_number_received = -1;
+  int sequence_number_received = -1;
 
   std::vector<uint8_t> read_buffer;
 
@@ -41,7 +47,8 @@ public:
  private:
   static constexpr uint8_t AckFlag = 0b1;
   static constexpr uint8_t DataFlag = 0b10;
-  static constexpr int PacketMaxSize = 10;
+  static constexpr int PacketMaxSize = 80;
+  static constexpr int MaxTransmissios = 10;
   void listen_thread_func();
 };
 
@@ -92,18 +99,22 @@ using std::uint8_t;
 int BRPClient::write(const char *data, int length) {
   constexpr int PayloadMaxSize = PacketMaxSize - 2;
   for (int i = 0; i < length; i+= PayloadMaxSize) {
-    for (int tries = 0; tries < 3; ++tries) {
+    int tries = 1;
+    for (; tries <= MaxTransmissios ; ++tries) {
       char packet[PacketMaxSize];
       packet[0] = DataFlag;
       packet[1] = sequence_number_sent;
       const int payload_bytes = std::min(PayloadMaxSize, length - i);
       memcpy(packet + 2, data + i, payload_bytes);
       send(sockfd, packet, payload_bytes + 2, 0);
-      std::unique_lock<std::mutex> lock(mutex);
+      std::unique_lock<std::mutex> lock(ack_mutex);
       ack_cv.wait_for(lock, std::chrono::seconds(1));
       if (ack_number_received == sequence_number_sent) {
         break;
       }
+    }
+    if (tries > MaxTransmissios) {
+      throw std::runtime_error("too many retries");
     }
     ++sequence_number_sent;
   }
@@ -111,8 +122,12 @@ int BRPClient::write(const char *data, int length) {
 }
 
 int BRPClient::read(char *buff, int length) {
-  std::unique_lock<std::mutex> lock(mutex);
+  std::unique_lock<std::mutex> lock(read_mutex);
+  while (read_buffer.empty()) {
+    read_cv.wait(lock);
+  }
   const int bytes_read = std::min(length, (int)read_buffer.size());
+  printf("reading %d bytes\n", bytes_read);
   std::memcpy(buff, read_buffer.data(), bytes_read);
   read_buffer.erase(read_buffer.begin(), read_buffer.begin() + bytes_read);
   return bytes_read;
@@ -156,9 +171,15 @@ void BRPClient::listen_thread_func() {
       if (r == -1) {
         perror("sendto");
       }
+      if ((int)seqno <= sequence_number_received) {
+        printf("duplicate packet detected, seqno %d, dropping\n", seqno);
+        continue;
+      }
+      sequence_number_received = seqno;
       // TODO: duplicate packet detection
-      std::unique_lock<std::mutex> lock(mutex);
-      std::copy(&buff[2], &buff[bytes_read - 2], std::back_inserter(read_buffer));
+      std::unique_lock<std::mutex> lock(read_mutex);
+      std::copy(&buff[2], &buff[bytes_read], std::back_inserter(read_buffer));
+      read_cv.notify_one();
     }
 
     if (buff[0] == AckFlag) {
@@ -168,7 +189,7 @@ void BRPClient::listen_thread_func() {
         break;
       }
       const uint8_t ack_seqno = buff[1];
-      std::unique_lock<std::mutex> lock(mutex);
+      std::unique_lock<std::mutex> lock(ack_mutex);
       ack_number_received = ack_seqno;
       ack_cv.notify_one();
     }
@@ -177,12 +198,25 @@ void BRPClient::listen_thread_func() {
 }
 
 int main(const int argc, const char *const argv[]) {
-  BRPClient client("127.0.0.1", 9989, false);
-  BRPClient server("127.0.0.1", 9989, true);
 
-  const char* text = "This is some text being sent from one client to another";
-  client.write(text, strlen(text));
-  char buff[10] = {0};
-  server.read(buff, 9);
-  printf("we got from client: %s\n", buff);
+  const char *ip = argv[1];
+  const uint16_t port = atoi(argv[2]);
+  if (argv[3][0] == 'c') {
+    BRPClient client(ip, port, false);
+    char buff[1024];
+    int bytes_sent = 0;
+    int r = 0;
+    while ((r = read(STDIN_FILENO, buff, sizeof(buff))) > 0) {
+      client.write(buff, r);
+      bytes_sent += r;
+    }
+    fprintf(stderr, "connection done, wrote %d bytes\n", bytes_sent);
+  } else {
+    BRPClient server(ip, port, true);
+    while (true) {
+      char buff[1024] = {0};
+      server.read(buff, sizeof(buff));
+      printf("read from client: [%s]\n", buff);
+    }
+  }
 }

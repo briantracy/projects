@@ -14,15 +14,22 @@
         bazel run :middleman -- 127.0.0.1 9999 127.0.0.1 5555 0
     Then kick off the infinite loop with a single packet:
         printf 'loop' > /dev/udp/127.0.0.1/5555
+
+    ./middleman 127.0.0.1 9999 127.0.0.1 8888 5
+    ncat -u --source-port 5555 127.0.0.1 9999
+    ncat -u --source-port 8888 127.0.0.1 9999
 */
 
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
+#include <time.h>
+
 
 
 int main(const int argc, const char *const argv[]) {
@@ -66,6 +73,10 @@ int main(const int argc, const char *const argv[]) {
         return 1;
     }
 
+    struct sockaddr_in first_sender;
+    bool got_first_packet = false;
+    srand(time(NULL));
+    const int drop_percent = atoi(argv[5]);
     while (1) {
         char buff[1 << 16];
         struct sockaddr_in sender;
@@ -75,9 +86,31 @@ int main(const int argc, const char *const argv[]) {
             perror("recvfrom");
             return 1;
         }
+        if (!got_first_packet) {
+            first_sender = sender;
+            got_first_packet = true;
+        }
         printf("got packet of size: %zd!\n", bytes_read);
+        const int roll = rand() % 100;
+        if (roll < drop_percent) {
+            printf("dropping packet (roll was %d)\n", roll);
+            continue;
+        }
 
-        const ssize_t bytes_sent = sendto(source_socket, buff, (size_t)bytes_read, 0, (struct sockaddr *)&sink_addr, sizeof(sink_addr));
+
+        struct sockaddr_in destination;
+        if (sender.sin_addr.s_addr == first_sender.sin_addr.s_addr &&
+            sender.sin_port == first_sender.sin_port) {
+            destination = sink_addr;
+        } else if (sender.sin_addr.s_addr == sink_addr.sin_addr.s_addr &&
+                sender.sin_port == sink_addr.sin_port) {
+            destination = first_sender;
+        } else {
+            fprintf(stderr, "got unknown sender, port: %d\n", ntohs(sender.sin_port));
+            return 1;
+        }
+
+        const ssize_t bytes_sent = sendto(source_socket, buff, (size_t)bytes_read, 0, (struct sockaddr *)&destination, sizeof(destination));
         if (bytes_sent < 0) {
             perror("sendto");
         }
