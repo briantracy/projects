@@ -2,14 +2,17 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <array>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <mutex>
@@ -30,15 +33,15 @@ class BRPClient {
   std::mutex read_mutex;
   std::condition_variable read_cv;
 
-  int sequence_number_sent = 0;
+  uint8_t seqno_sent = 0;
   int ack_number_received = -1;
-  int sequence_number_received = -1;
+  uint8_t peer_seqno = 0;
 
   std::vector<uint8_t> read_buffer;
 
   int sockfd;
-public:
 
+ public:
   BRPClient(const char *ip, short port, bool is_server);
   ~BRPClient();
   int write(const char *data, int length);
@@ -47,8 +50,8 @@ public:
  private:
   static constexpr uint8_t AckFlag = 0b1;
   static constexpr uint8_t DataFlag = 0b10;
-  static constexpr int PacketMaxSize = 80;
-  static constexpr int MaxTransmissios = 10;
+  static constexpr int PacketMaxSize = 1000;
+  static constexpr int MaxTransmissions = 10;
   void listen_thread_func();
 };
 
@@ -60,14 +63,14 @@ BRPClient::BRPClient(const char *ip, short port, bool is_server) {
   sockaddr_in source_addr = {};
   source_addr.sin_family = AF_INET;
   if (is_server) {
-    if (inet_pton(AF_INET, "127.0.0.1", &(source_addr.sin_addr)) != 1) {
-      fprintf(stderr, "could not parse source ipv4: [%s]\n", "127.0.0.1");
+    if (inet_pton(AF_INET, ip, &(source_addr.sin_addr)) != 1) {
+      fprintf(stderr, "could not parse source ipv4: [%s]\n", ip);
     }
   } else {
   }
   source_addr.sin_port = is_server ? htons(port) : 0;
-  if (bind(sockfd, (struct sockaddr *)&source_addr,
-           sizeof(struct sockaddr)) == -1) {
+  if (bind(sockfd, (struct sockaddr *)&source_addr, sizeof(struct sockaddr)) ==
+      -1) {
     throw std::runtime_error{"bind error: " +
                              std::string(std::strerror(errno))};
   }
@@ -76,7 +79,7 @@ BRPClient::BRPClient(const char *ip, short port, bool is_server) {
     sockaddr_in peer = {};
     peer.sin_family = AF_INET;
     if (inet_pton(AF_INET, ip, &(peer.sin_addr)) != 1) {
-      fprintf(stderr, "could not parse source ipv4: [%s]\n", "127.0.0.1");
+      fprintf(stderr, "could not parse source ipv4: [%s]\n", ip);
     }
     peer.sin_port = htons(port);
     if (connect(sockfd, (sockaddr *)&peer, sizeof(peer)) != 0) {
@@ -86,38 +89,40 @@ BRPClient::BRPClient(const char *ip, short port, bool is_server) {
   }
 
   listen_thread = std::thread(&BRPClient::listen_thread_func, this);
-  listen_thread.detach();
+  // listen_thread.detach();
 }
 
-
-BRPClient::~BRPClient() {
-  //listen_thread.join();
-}
+BRPClient::~BRPClient() { listen_thread.join(); }
 
 using std::uint8_t;
 
 int BRPClient::write(const char *data, int length) {
+  // std::this_thread::sleep_for(std::chrono::seconds(1));
   constexpr int PayloadMaxSize = PacketMaxSize - 2;
-  for (int i = 0; i < length; i+= PayloadMaxSize) {
+  int bytes_sent = 0;
+  do {
+    char packet[PacketMaxSize];
+    packet[0] = DataFlag;
+    packet[1] = seqno_sent;
+    const int payload_bytes = std::min(PayloadMaxSize, length - bytes_sent);
+    memcpy(packet + 2, data + bytes_sent, payload_bytes);
+
     int tries = 1;
-    for (; tries <= MaxTransmissios ; ++tries) {
-      char packet[PacketMaxSize];
-      packet[0] = DataFlag;
-      packet[1] = sequence_number_sent;
-      const int payload_bytes = std::min(PayloadMaxSize, length - i);
-      memcpy(packet + 2, data + i, payload_bytes);
+    for (; tries <= MaxTransmissions; ++tries) {
       send(sockfd, packet, payload_bytes + 2, 0);
       std::unique_lock<std::mutex> lock(ack_mutex);
       ack_cv.wait_for(lock, std::chrono::seconds(1));
-      if (ack_number_received == sequence_number_sent) {
+      if (ack_number_received == seqno_sent) {
         break;
       }
+      fprintf(stderr, "RETRANSMISSION %d\n", seqno_sent);
     }
-    if (tries > MaxTransmissios) {
+    if (tries > MaxTransmissions) {
       throw std::runtime_error("too many retries");
     }
-    ++sequence_number_sent;
-  }
+    bytes_sent += payload_bytes;
+    ++seqno_sent;
+  } while (bytes_sent < length);
   return 0;
 }
 
@@ -133,7 +138,6 @@ int BRPClient::read(char *buff, int length) {
   return bytes_read;
 }
 
-
 void BRPClient::listen_thread_func() {
   std::cout << "listen thread\n";
   bool connected = false;
@@ -141,10 +145,15 @@ void BRPClient::listen_thread_func() {
     char buff[1 << 16];
     sockaddr_in sender;
     socklen_t socklen = sizeof(sockaddr);
-    const ssize_t bytes_read = recvfrom(sockfd, buff, sizeof(buff), 0,
-                                        (sockaddr *)&sender, &socklen);
+    fprintf(stderr, "calling recvfrom\n");
+    const ssize_t bytes_read =
+        recvfrom(sockfd, buff, sizeof(buff), 0, (sockaddr *)&sender, &socklen);
 
     if (bytes_read < 0) {
+      if (errno == ECONNREFUSED) {
+        // close connection here
+        fprintf(stderr, "remote connection close detected\n");
+      }
       throw std::runtime_error{"recvfrom error: " +
                                std::string(std::strerror(errno))};
     }
@@ -160,10 +169,6 @@ void BRPClient::listen_thread_func() {
 
     if (buff[0] == DataFlag) {
       printf("got data");
-      if (bytes_read < 2) {
-        printf("malformed packet -- too small\n");
-        break;
-      }
       const uint8_t seqno = static_cast<uint8_t>(buff[1]);
       printf(" -- remote seqno = %d\n", seqno);
       const uint8_t ack_packet[2] = {AckFlag, seqno};
@@ -171,34 +176,32 @@ void BRPClient::listen_thread_func() {
       if (r == -1) {
         perror("sendto");
       }
-      if ((int)seqno <= sequence_number_received) {
-        printf("duplicate packet detected, seqno %d, dropping\n", seqno);
+      if (seqno != peer_seqno) {
+        fprintf(stderr, "wrong data seqno received: %x (expected) vs %x (given)\n",
+                peer_seqno, seqno);
         continue;
       }
-      sequence_number_received = seqno;
-      // TODO: duplicate packet detection
+      peer_seqno++;
+      const int payload_length = bytes_read - 2;
+      if (payload_length == 0) {
+        // TODO detect end of transmission
+      }
       std::unique_lock<std::mutex> lock(read_mutex);
       std::copy(&buff[2], &buff[bytes_read], std::back_inserter(read_buffer));
       read_cv.notify_one();
     }
 
     if (buff[0] == AckFlag) {
-      printf("got ack");
-      if (bytes_read < 2) {
-        printf("malformed packet -- too small\n");
-        break;
-      }
+      fprintf(stderr, "got ack\n");
       const uint8_t ack_seqno = buff[1];
       std::unique_lock<std::mutex> lock(ack_mutex);
       ack_number_received = ack_seqno;
       ack_cv.notify_one();
     }
-
   }
 }
 
 int main(const int argc, const char *const argv[]) {
-
   const char *ip = argv[1];
   const uint16_t port = atoi(argv[2]);
   if (argv[3][0] == 'c') {
@@ -211,12 +214,16 @@ int main(const int argc, const char *const argv[]) {
       bytes_sent += r;
     }
     fprintf(stderr, "connection done, wrote %d bytes\n", bytes_sent);
+    client.write(nullptr, 0);
+    fprintf(stderr, "sent terminate message");
   } else {
     BRPClient server(ip, port, true);
     while (true) {
-      char buff[1024] = {0};
-      server.read(buff, sizeof(buff));
+      constexpr size_t SIZE = 1024;
+      char buff[SIZE + 1] = {0};
+      int bytes_read = server.read(buff, SIZE);
       printf("read from client: [%s]\n", buff);
+      server.write(buff, bytes_read);
     }
   }
 }
